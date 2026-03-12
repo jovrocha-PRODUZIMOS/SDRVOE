@@ -1,0 +1,635 @@
+{
+  "name": "General Grana - Assistente Financeiro",
+  "nodes": [
+    {
+      "id": "webhook_1",
+      "name": "Webhook Evolution",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 380],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "general-grana",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "webhookId": "general-grana-001"
+    },
+    {
+      "id": "parse_2",
+      "name": "Extrair Mensagem",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [500, 380],
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body ?? $input.first().json;\n\nlet phone = '';\nlet messageText = '';\n\ntry {\n  const data = body.data ?? body;\n  const key = data.key ?? {};\n  const message = data.message ?? {};\n  const remoteJid = key.remoteJid ?? '';\n\n  // Ignorar mensagens de grupos\n  if (remoteJid.includes('@g.us')) {\n    return [{ json: { ignore: true } }];\n  }\n\n  phone = remoteJid\n    .replace('@s.whatsapp.net', '')\n    .replace(/\\D/g, '');\n\n  messageText =\n    message.conversation ||\n    (message.extendedTextMessage && message.extendedTextMessage.text) ||\n    '';\n\n  if (!messageText.trim() || !phone) {\n    return [{ json: { ignore: true } }];\n  }\n\n} catch (e) {\n  return [{ json: { ignore: true, error: e.message } }];\n}\n\nreturn [{\n  json: {\n    phone,\n    messageText: messageText.trim(),\n    messageLower: messageText.trim().toLowerCase(),\n    ignore: false\n  }\n}];"
+      }
+    },
+    {
+      "id": "get_user_3",
+      "name": "Buscar Usuário",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [750, 380],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/users",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey", "value": "={{ $vars.SUPABASE_KEY }}" },
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $vars.SUPABASE_KEY }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "phone", "value": "={{ 'eq.' + $('Extrair Mensagem').first().json.phone }}" },
+            { "name": "select", "value": "*" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "route_4",
+      "name": "Lógica de Roteamento",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 380],
+      "parameters": {
+        "jsCode": "const parsed = $('Extrair Mensagem').first().json;\nconst usersData = $input.first().json;\n\nif (parsed.ignore) {\n  return [{ json: { route: 'ignore' } }];\n}\n\nconst { phone, messageText, messageLower } = parsed;\nconst userList = Array.isArray(usersData) ? usersData : [];\nconst user = userList.length > 0 ? userList[0] : null;\n\nif (!user) {\n  return [{ json: { route: 'new_user', phone, messageText, messageLower, user: null } }];\n}\n\nif (!user.onboarding_complete) {\n  return [{ json: { route: 'onboarding', phone, messageText, messageLower, user } }];\n}\n\n// Detecção de intenção\nconst EXPENSE_KW    = ['gastei', 'paguei', 'comprei', 'torrei', 'acabei de gastar', 'gastando'];\nconst MONTHLY_KW    = ['quanto gastei esse mês', 'resumo do mês', 'meu saldo', 'situação financeira', 'gastos do mês', 'como to esse mes', 'como estou esse mês', 'quanto gastei no mes'];\nconst CAT_KW        = ['quanto gastei com', 'quanto gastei no', 'quanto gastei na', 'gasto com '];\nconst ANNUAL_KW     = ['esse ano', 'resumo anual', 'total do ano', 'quanto gastei esse ano'];\n\nlet intent = 'unknown';\nif (EXPENSE_KW.some(k => messageLower.includes(k)))      intent = 'expense';\nelse if (MONTHLY_KW.some(k => messageLower.includes(k))) intent = 'monthly_summary';\nelse if (CAT_KW.some(k => messageLower.includes(k)))     intent = 'category_spending';\nelse if (ANNUAL_KW.some(k => messageLower.includes(k)))  intent = 'annual_summary';\n\nreturn [{ json: { route: intent, phone, messageText, messageLower, user } }];"
+      }
+    },
+    {
+      "id": "switch_5",
+      "name": "Switch Rota Principal",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [1250, 380],
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.route }}",
+        "rules": {
+          "rules": [
+            { "value2": "new_user",        "output": 0 },
+            { "value2": "onboarding",      "output": 1 },
+            { "value2": "expense",         "output": 2 },
+            { "value2": "monthly_summary", "output": 3 },
+            { "value2": "unknown",         "output": 4 }
+          ]
+        },
+        "fallbackOutput": 4
+      }
+    },
+
+    {
+      "id": "create_user_6",
+      "name": "Criar Usuário",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1500, 80],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/users",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $vars.SUPABASE_KEY }}" },
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $vars.SUPABASE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Prefer",        "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "phone",               "value": "={{ $('Lógica de Roteamento').first().json.phone }}" },
+            { "name": "onboarding_step",     "value": "=1" },
+            { "name": "onboarding_complete", "value": "=false" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "send_welcome_7",
+      "name": "Enviar Boas-Vindas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1750, 80],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.EVOLUTION_URL }}/message/sendText/{{ $vars.EVOLUTION_INSTANCE }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",       "value": "={{ $vars.EVOLUTION_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "number", "value": "={{ $('Lógica de Roteamento').first().json.phone }}" },
+            { "name": "text",   "value": "Sentido firme, RECRUTA! 🎖️ Aqui é o *General Grana*.\n\nAntes de qualquer coisa preciso saber quanto você PLANEJA gastar por mês em cada categoria. Vou perguntar uma por uma.\n\n_(Pode mandar 0 se não quiser monitorar essa categoria)_\n\nPrimeira missão: quanto você vai gastar por mês em *Alimentação* 🍔?\n_(iFood, restaurante, mercado, lanche...)_" }
+          ]
+        },
+        "options": {}
+      }
+    },
+
+    {
+      "id": "process_onboarding_8",
+      "name": "Processar Onboarding",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 220],
+      "parameters": {
+        "jsCode": "const routeData = $('Lógica de Roteamento').first().json;\nconst { user, messageText, messageLower, phone } = routeData;\nconst step = user.onboarding_step || 1;\n\n// ⚠️ CONFIGURE: Substitua pelos UUIDs reais das categorias no seu Supabase\n// Execute: SELECT id, name FROM categories ORDER BY name no Supabase\nconst CATEGORIES = [\n  { step: 1, name: 'Alimentação',  emoji: '🍔', id: 'UUID_ALIMENTACAO'  },\n  { step: 2, name: 'Transporte',   emoji: '🚗', id: 'UUID_TRANSPORTE'   },\n  { step: 3, name: 'Lazer',        emoji: '🎮', id: 'UUID_LAZER'        },\n  { step: 4, name: 'Saúde',        emoji: '💊', id: 'UUID_SAUDE'        },\n  { step: 5, name: 'Moradia',      emoji: '🏠', id: 'UUID_MORADIA'      },\n  { step: 6, name: 'Roupas',       emoji: '👕', id: 'UUID_ROUPAS'       },\n  { step: 7, name: 'Educação',     emoji: '📚', id: 'UUID_EDUCACAO'     }\n];\n\n// Extrair valor numérico da mensagem do usuário\nconst amountMatch = messageLower.match(/(\\d+[,.]?\\d*)/);\nconst amount = amountMatch ? parseFloat(amountMatch[1].replace(',', '.')) : 0;\n\nconst currentCat = CATEGORIES.find(c => c.step === step);\nconst newStep    = step + 1;\nconst isLastStep = newStep > 7;\n\nlet nextMessage = '';\nif (!isLastStep) {\n  const nextCat = CATEGORIES.find(c => c.step === newStep);\n  nextMessage = `✅ Anotado! Agora me fala:\\n\\nQuanto você vai gastar por mês em *${nextCat.name}* ${nextCat.emoji}?`;\n} else {\n  nextMessage = `✅ *Briefing concluído, recruta!*\\n\\nAgora toda vez que gastar, me manda:\\n\\n*\"General, gastei 50 reais no iFood\"*\\n\\nE eu registro e te xingo quando necessário. Pode começar! 🎖️`;\n}\n\nreturn [{\n  json: {\n    phone,\n    userId: user.id,\n    categoryId: currentCat ? currentCat.id : null,\n    budgetAmount: amount,\n    newStep,\n    onboardingComplete: isLastStep,\n    nextMessage\n  }\n}];"
+      }
+    },
+    {
+      "id": "save_budget_9",
+      "name": "Salvar Meta Categoria",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1750, 220],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/user_budgets",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $vars.SUPABASE_KEY }}" },
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $vars.SUPABASE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Prefer",        "value": "resolution=merge-duplicates,return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "user_id",       "value": "={{ $json.userId }}" },
+            { "name": "category_id",   "value": "={{ $json.categoryId }}" },
+            { "name": "monthly_limit", "value": "={{ $json.budgetAmount }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "update_step_10",
+      "name": "Atualizar Step Usuário",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 220],
+      "parameters": {
+        "method": "PATCH",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/users",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $vars.SUPABASE_KEY }}" },
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $vars.SUPABASE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Prefer",        "value": "return=representation" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "id", "value": "={{ 'eq.' + $('Processar Onboarding').first().json.userId }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "onboarding_step",     "value": "={{ $('Processar Onboarding').first().json.newStep }}" },
+            { "name": "onboarding_complete", "value": "={{ $('Processar Onboarding').first().json.onboardingComplete }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "send_onboarding_11",
+      "name": "Enviar Msg Onboarding",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2250, 220],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.EVOLUTION_URL }}/message/sendText/{{ $vars.EVOLUTION_INSTANCE }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",       "value": "={{ $vars.EVOLUTION_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "number", "value": "={{ $('Processar Onboarding').first().json.phone }}" },
+            { "name": "text",   "value": "={{ $('Processar Onboarding').first().json.nextMessage }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+
+    {
+      "id": "parse_expense_12",
+      "name": "Parsear Gasto e Categoria",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 380],
+      "parameters": {
+        "jsCode": "const routeData = $('Lógica de Roteamento').first().json;\nconst { user, messageText, messageLower, phone } = routeData;\n\n// Extrair valor da mensagem\nconst amountPatterns = [\n  /r\\$\\s*(\\d+[.,]\\d{2})/i,\n  /r\\$\\s*(\\d+)/i,\n  /(\\d+[.,]\\d{2})\\s*(?:reais?|r\\$)?/i,\n  /(\\d+)\\s*reais/i,\n  /(\\d+)/\n];\n\nlet amount = 0;\nfor (const pattern of amountPatterns) {\n  const match = messageLower.match(pattern);\n  if (match) {\n    amount = parseFloat(match[1].replace(',', '.'));\n    break;\n  }\n}\n\n// Extrair descrição\nlet description = '';\nconst descPatterns = [\n  /(?:gastei|paguei|comprei|torrei)[^0-9]*(?:\\d+[.,]?\\d*\\s*(?:reais?|r\\$)?\\s*)?(?:em|no|na|com|de|pra|num|numa)?\\s*(.+)/i,\n  /(?:em|no|na|com|de)\\s+(.+)$/i\n];\nfor (const pattern of descPatterns) {\n  const match = messageText.match(pattern);\n  if (match && match[1]) { description = match[1].trim(); break; }\n}\nif (!description) description = messageText;\n\n// ⚠️ CONFIGURE: Substitua pelos UUIDs reais das suas categorias no Supabase\nconst CATEGORIES = [\n  { name: 'Alimentação', id: 'UUID_ALIMENTACAO', keywords: ['ifood', 'restaurante', 'lanche', 'almoço', 'jantar', 'mercado', 'padaria', 'pizza', 'hamburguer', 'burger', 'comida', 'refeição', 'churrasco', 'sushi', 'marmita', 'açaí', 'pastel', 'cafe', 'café'] },\n  { name: 'Transporte',  id: 'UUID_TRANSPORTE',  keywords: ['uber', '99', 'taxi', 'gasolina', 'combustivel', 'onibus', 'metro', 'estacionamento', 'pedagio', 'posto', 'metrô', 'ônibus'] },\n  { name: 'Lazer',       id: 'UUID_LAZER',       keywords: ['netflix', 'spotify', 'cinema', 'show', 'jogo', 'bar', 'balada', 'viagem', 'hotel', 'ingresso', 'streaming', 'prime', 'disney', 'youtube', 'game', 'festa', 'choperia'] },\n  { name: 'Saúde',       id: 'UUID_SAUDE',       keywords: ['farmacia', 'remedio', 'consulta', 'medico', 'academia', 'dentista', 'exame', 'plano de saude', 'hospital', 'clinica', 'drogaria'] },\n  { name: 'Moradia',     id: 'UUID_MORADIA',     keywords: ['aluguel', 'condominio', 'conta de luz', 'agua', 'internet', 'gas', 'luz', 'energia', 'boleto', 'iptu', 'net', 'claro', 'vivo', 'tim'] },\n  { name: 'Roupas',      id: 'UUID_ROUPAS',      keywords: ['roupa', 'tenis', 'sapato', 'camisa', 'calça', 'vestido', 'shein', 'zara', 'renner', 'hm', 'blusa', 'shorts', 'cueca', 'meia', 'jaqueta'] },\n  { name: 'Educação',    id: 'UUID_EDUCACAO',    keywords: ['curso', 'faculdade', 'livro', 'escola', 'udemy', 'alura', 'certificado', 'mensalidade'] }\n];\n\nconst descLower = description.toLowerCase();\nlet categoryId   = 'UUID_OUTROS';\nlet categoryName = 'Outros';\nfor (const cat of CATEGORIES) {\n  if (cat.keywords.some(kw => descLower.includes(kw) || messageLower.includes(kw))) {\n    categoryId   = cat.id;\n    categoryName = cat.name;\n    break;\n  }\n}\n\nconst now  = new Date();\nconst month = now.getMonth() + 1;\nconst year  = now.getFullYear();\nconst expenseDate = now.toISOString().split('T')[0];\n\nreturn [{\n  json: {\n    phone,\n    userId: user.id,\n    amount,\n    description,\n    categoryId,\n    categoryName,\n    month,\n    year,\n    expenseDate\n  }\n}];"
+      }
+    },
+    {
+      "id": "insert_expense_13",
+      "name": "Inserir Gasto Supabase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1750, 380],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/expenses",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $vars.SUPABASE_KEY }}" },
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $vars.SUPABASE_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" },
+            { "name": "Prefer",        "value": "return=representation" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "user_id",      "value": "={{ $('Parsear Gasto e Categoria').first().json.userId }}" },
+            { "name": "category_id",  "value": "={{ $('Parsear Gasto e Categoria').first().json.categoryId }}" },
+            { "name": "amount",       "value": "={{ $('Parsear Gasto e Categoria').first().json.amount }}" },
+            { "name": "description",  "value": "={{ $('Parsear Gasto e Categoria').first().json.description }}" },
+            { "name": "raw_message",  "value": "={{ $('Parsear Gasto e Categoria').first().json.description }}" },
+            { "name": "expense_date", "value": "={{ $('Parsear Gasto e Categoria').first().json.expenseDate }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "get_cat_total_14",
+      "name": "Gastos Mensais Categoria",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 380],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/expenses",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $vars.SUPABASE_KEY }}" },
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $vars.SUPABASE_KEY }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "user_id",     "value": "={{ 'eq.' + $('Parsear Gasto e Categoria').first().json.userId }}" },
+            { "name": "category_id", "value": "={{ 'eq.' + $('Parsear Gasto e Categoria').first().json.categoryId }}" },
+            { "name": "month",       "value": "={{ 'eq.' + $('Parsear Gasto e Categoria').first().json.month }}" },
+            { "name": "year",        "value": "={{ 'eq.' + $('Parsear Gasto e Categoria').first().json.year }}" },
+            { "name": "select",      "value": "amount" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "get_cat_budget_15",
+      "name": "Meta da Categoria",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2250, 380],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/user_budgets",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $vars.SUPABASE_KEY }}" },
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $vars.SUPABASE_KEY }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "user_id",     "value": "={{ 'eq.' + $('Parsear Gasto e Categoria').first().json.userId }}" },
+            { "name": "category_id", "value": "={{ 'eq.' + $('Parsear Gasto e Categoria').first().json.categoryId }}" },
+            { "name": "select",      "value": "monthly_limit" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "gen_response_16",
+      "name": "Gerar Resposta General",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2500, 380],
+      "parameters": {
+        "jsCode": "const expense    = $('Parsear Gasto e Categoria').first().json;\nconst catExpenses = $('Gastos Mensais Categoria').first().json;\nconst budgetData  = $('Meta da Categoria').first().json;\n\nconst { amount, description, categoryName, phone } = expense;\n\n// Somar todos os gastos da categoria no mês\nconst expenseList = Array.isArray(catExpenses) ? catExpenses : [];\nconst categoryTotal = expenseList.reduce((sum, e) => sum + parseFloat(e.amount || 0), 0);\n\n// Pegar meta da categoria\nconst budgetList  = Array.isArray(budgetData) ? budgetData : [];\nconst monthlyLimit = budgetList.length > 0 ? parseFloat(budgetList[0].monthly_limit) : 0;\n\nconst percentage = monthlyLimit > 0 ? (categoryTotal / monthlyLimit) * 100 : 0;\nconst remaining  = monthlyLimit - categoryTotal;\nconst overflow   = categoryTotal - monthlyLimit;\n\n// Templates de resposta por nível de raiva\nconst responses = {\n  low: [\n    `Registrado, recruta! Você jogou fora *R$ ${amount.toFixed(2)}* em ${description}.\\nTotal em *${categoryName}* esse mês: *R$ ${categoryTotal.toFixed(2)}*. Continua assim não.`,\n    `Anotado o desperdício de *R$ ${amount.toFixed(2)}* em ${description}.\\nTotal em *${categoryName}* esse mês: *R$ ${categoryTotal.toFixed(2)}*. Ainda tá no controle, mas vai com calma.`\n  ],\n  medium: [\n    `PORRA! Mais *R$ ${amount.toFixed(2)}* em ${description}?!\\nVocê já queimou *R$ ${categoryTotal.toFixed(2)}* de *R$ ${monthlyLimit.toFixed(2)}* em *${categoryName}* — isso é *${percentage.toFixed(0)}%* do limite! Segura a onda, recruta!`,\n    `Vai tomar vergonha! Já foi *R$ ${categoryTotal.toFixed(2)}* de *R$ ${monthlyLimit.toFixed(2)}* em *${categoryName}*!\\n${percentage.toFixed(0)}% do orçamento foi pro lixo. Para de sangrar o bolso!`\n  ],\n  high: [\n    `VAI TOMA NO CU, RECRUTA! ⚠️\\n*${percentage.toFixed(0)}%* do limite de *${categoryName}* já foi!\\nSó restam *R$ ${remaining.toFixed(2)}* antes do estouro total. PARA DE GASTAR!`,\n    `IRRESPONSÁVEL! Você usou *${percentage.toFixed(0)}%* do limite de *${categoryName}*.\\nFaltam só *R$ ${remaining.toFixed(2)}* pra explodir o orçamento. SUA MÃE TÁ VENDO, RECRUTA!`\n  ],\n  over: [\n    `🚨 MISSÃO FRACASSADA! Você *ESTOUROU* o limite de *${categoryName}*!\\nEra *R$ ${monthlyLimit.toFixed(2)}* e você já torrou *R$ ${categoryTotal.toFixed(2)}*!\\nUltrapassou em *R$ ${overflow.toFixed(2)}*! INCOMPETENTE! VAI VENDER O RIM!`,\n    `RECRUTA FALIDO! 🚨 O orçamento de *${categoryName}* explodiu!\\n*R$ ${overflow.toFixed(2)}* acima do limite! Isso é uma VERGONHA! Vai plantar dinheiro no quintal?!`\n  ],\n  no_limit: [\n    `Anotado! *R$ ${amount.toFixed(2)}* em ${description} registrado em *${categoryName}*.\\nTotal do mês nessa categoria: *R$ ${categoryTotal.toFixed(2)}*.\\nVocê nem colocou limite aqui, recruta irresponsável. Tá jogando no escuro!`\n  ]\n};\n\nlet toneKey = 'no_limit';\nif (monthlyLimit > 0) {\n  if (percentage <= 50)       toneKey = 'low';\n  else if (percentage <= 80)  toneKey = 'medium';\n  else if (percentage <= 100) toneKey = 'high';\n  else                         toneKey = 'over';\n}\n\nconst pool         = responses[toneKey];\nconst responseText = pool[Math.floor(Math.random() * pool.length)];\n\nreturn [{ json: { phone, responseText } }];"
+      }
+    },
+    {
+      "id": "send_expense_17",
+      "name": "Enviar Resposta Gasto",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2750, 380],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.EVOLUTION_URL }}/message/sendText/{{ $vars.EVOLUTION_INSTANCE }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",       "value": "={{ $vars.EVOLUTION_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "number", "value": "={{ $json.phone }}" },
+            { "name": "text",   "value": "={{ $json.responseText }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+
+    {
+      "id": "get_month_expenses_18",
+      "name": "Buscar Gastos do Mês",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1500, 560],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/expenses",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $vars.SUPABASE_KEY }}" },
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $vars.SUPABASE_KEY }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "user_id", "value": "={{ 'eq.' + $('Lógica de Roteamento').first().json.user.id }}" },
+            { "name": "month",   "value": "={{ 'eq.' + (new Date().getMonth() + 1) }}" },
+            { "name": "year",    "value": "={{ 'eq.' + new Date().getFullYear() }}" },
+            { "name": "select",  "value": "amount,category_id,categories(name,emoji)" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "get_user_budgets_19",
+      "name": "Buscar Metas Usuário",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1750, 560],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $vars.SUPABASE_URL }}/rest/v1/user_budgets",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",        "value": "={{ $vars.SUPABASE_KEY }}" },
+            { "name": "Authorization", "value": "={{ 'Bearer ' + $vars.SUPABASE_KEY }}" }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "user_id", "value": "={{ 'eq.' + $('Lógica de Roteamento').first().json.user.id }}" },
+            { "name": "select",  "value": "monthly_limit,categories(name,emoji)" }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "format_summary_20",
+      "name": "Formatar Resumo Mensal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 560],
+      "parameters": {
+        "jsCode": "const routeData     = $('Lógica de Roteamento').first().json;\nconst monthlyData   = $('Buscar Gastos do Mês').first().json;\nconst budgetsData   = $('Buscar Metas Usuário').first().json;\n\nconst { phone } = routeData;\nconst expenses  = Array.isArray(monthlyData) ? monthlyData : [];\nconst budgets   = Array.isArray(budgetsData) ? budgetsData : [];\n\nconst months = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];\nconst now    = new Date();\nconst monthName = months[now.getMonth()];\nconst year      = now.getFullYear();\n\n// Agrupar gastos por categoria\nconst grouped = {};\nfor (const exp of expenses) {\n  const catName  = (exp.categories && exp.categories.name)  || 'Outros';\n  const catEmoji = (exp.categories && exp.categories.emoji) || '💸';\n  if (!grouped[catName]) grouped[catName] = { total: 0, emoji: catEmoji };\n  grouped[catName].total += parseFloat(exp.amount || 0);\n}\n\n// Mapear metas por categoria\nconst budgetMap = {};\nfor (const b of budgets) {\n  const catName = b.categories && b.categories.name;\n  if (catName) budgetMap[catName] = parseFloat(b.monthly_limit || 0);\n}\n\n// Montar linhas do relatório\nlet totalGeral = 0;\nconst lines = [];\nconst sortedCats = Object.entries(grouped).sort((a, b) => b[1].total - a[1].total);\n\nfor (const [catName, data] of sortedCats) {\n  const limit   = budgetMap[catName] || 0;\n  const pct     = limit > 0 ? Math.round((data.total / limit) * 100) : null;\n  const pctStr  = pct !== null ? ` (${pct}%)` : '';\n  const alert   = pct && pct >= 100 ? ' 🔴' : (pct && pct >= 80 ? ' ⚠️' : '');\n  const limStr  = limit > 0 ? ` / R$ ${limit.toFixed(2)}` : '';\n  lines.push(`${data.emoji} *${catName}*: R$ ${data.total.toFixed(2)}${limStr}${pctStr}${alert}`);\n  totalGeral += data.total;\n}\n\nlet summaryText;\nif (lines.length === 0) {\n  summaryText = `Situação de *${monthName}/${year}*: ZERO gasto registrado, recruta.\\nOu você é milagrosamente frugal, ou esqueceu de me avisar dos gastos. Provavelmente a segunda opção.`;\n} else {\n  const intro = totalGeral > 3000\n    ? `🚨 Relatório de *${monthName}/${year}*, recruta. Prepara o coração:\\n\\n`\n    : `📊 Situação do campo em *${monthName}/${year}*:\\n\\n`;\n  const outro = totalGeral > 3000\n    ? `\\n\\n💸 *TOTAL DESTRUÍDO: R$ ${totalGeral.toFixed(2)}*\\n\\nTá satisfeito com essa carnificina financeira, recruta?! VAI POUPAR!`\n    : `\\n\\n💸 *TOTAL DO MÊS: R$ ${totalGeral.toFixed(2)}*\\n\\nPoderia ser pior. Mas poderia ser melhor também. Vai poupar, recruta.`;\n  summaryText = intro + lines.join('\\n') + outro;\n}\n\nreturn [{ json: { phone, responseText: summaryText } }];"
+      }
+    },
+    {
+      "id": "send_summary_21",
+      "name": "Enviar Resumo Mensal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2250, 560],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.EVOLUTION_URL }}/message/sendText/{{ $vars.EVOLUTION_INSTANCE }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",       "value": "={{ $vars.EVOLUTION_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "number", "value": "={{ $json.phone }}" },
+            { "name": "text",   "value": "={{ $json.responseText }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+
+    {
+      "id": "unknown_22",
+      "name": "Resposta Desconhecida",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 700],
+      "parameters": {
+        "jsCode": "const routeData = $('Lógica de Roteamento').first().json;\nconst { phone } = routeData;\n\nconst respostas = [\n  'Fala direito, recruta! Me diz quanto gastou e onde.\\nExemplo: *\"General, gastei 50 reais no iFood\"*',\n  'Isso não é ordem que se dá! Me manda o valor e o que comprou.\\nExemplo: *\"gastei 30 reais no uber\"*',\n  'Não entendi patavina. Quer ver seus gastos? Manda *\"quanto gastei esse mês\"*.\\nQuer registrar um gasto? Me fala o valor e onde gastou.',\n  'Recruta, fala de forma que eu entenda!\\nRegistrar gasto: *\"gastei X reais em Y\"*\\nVer resumo: *\"quanto gastei esse mês\"*'\n];\n\nconst responseText = respostas[Math.floor(Math.random() * respostas.length)];\nreturn [{ json: { phone, responseText } }];"
+      }
+    },
+    {
+      "id": "send_unknown_23",
+      "name": "Enviar Resposta Desconhecida",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1750, 700],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.EVOLUTION_URL }}/message/sendText/{{ $vars.EVOLUTION_INSTANCE }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "apikey",       "value": "={{ $vars.EVOLUTION_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "number", "value": "={{ $json.phone }}" },
+            { "name": "text",   "value": "={{ $json.responseText }}" }
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+
+  "connections": {
+    "Webhook Evolution": {
+      "main": [[{ "node": "Extrair Mensagem", "type": "main", "index": 0 }]]
+    },
+    "Extrair Mensagem": {
+      "main": [[{ "node": "Buscar Usuário", "type": "main", "index": 0 }]]
+    },
+    "Buscar Usuário": {
+      "main": [[{ "node": "Lógica de Roteamento", "type": "main", "index": 0 }]]
+    },
+    "Lógica de Roteamento": {
+      "main": [[{ "node": "Switch Rota Principal", "type": "main", "index": 0 }]]
+    },
+    "Switch Rota Principal": {
+      "main": [
+        [{ "node": "Criar Usuário",           "type": "main", "index": 0 }],
+        [{ "node": "Processar Onboarding",    "type": "main", "index": 0 }],
+        [{ "node": "Parsear Gasto e Categoria","type": "main", "index": 0 }],
+        [{ "node": "Buscar Gastos do Mês",    "type": "main", "index": 0 }],
+        [{ "node": "Resposta Desconhecida",   "type": "main", "index": 0 }]
+      ]
+    },
+    "Criar Usuário": {
+      "main": [[{ "node": "Enviar Boas-Vindas", "type": "main", "index": 0 }]]
+    },
+    "Processar Onboarding": {
+      "main": [[{ "node": "Salvar Meta Categoria", "type": "main", "index": 0 }]]
+    },
+    "Salvar Meta Categoria": {
+      "main": [[{ "node": "Atualizar Step Usuário", "type": "main", "index": 0 }]]
+    },
+    "Atualizar Step Usuário": {
+      "main": [[{ "node": "Enviar Msg Onboarding", "type": "main", "index": 0 }]]
+    },
+    "Parsear Gasto e Categoria": {
+      "main": [[{ "node": "Inserir Gasto Supabase", "type": "main", "index": 0 }]]
+    },
+    "Inserir Gasto Supabase": {
+      "main": [[{ "node": "Gastos Mensais Categoria", "type": "main", "index": 0 }]]
+    },
+    "Gastos Mensais Categoria": {
+      "main": [[{ "node": "Meta da Categoria", "type": "main", "index": 0 }]]
+    },
+    "Meta da Categoria": {
+      "main": [[{ "node": "Gerar Resposta General", "type": "main", "index": 0 }]]
+    },
+    "Gerar Resposta General": {
+      "main": [[{ "node": "Enviar Resposta Gasto", "type": "main", "index": 0 }]]
+    },
+    "Buscar Gastos do Mês": {
+      "main": [[{ "node": "Buscar Metas Usuário", "type": "main", "index": 0 }]]
+    },
+    "Buscar Metas Usuário": {
+      "main": [[{ "node": "Formatar Resumo Mensal", "type": "main", "index": 0 }]]
+    },
+    "Formatar Resumo Mensal": {
+      "main": [[{ "node": "Enviar Resumo Mensal", "type": "main", "index": 0 }]]
+    },
+    "Resposta Desconhecida": {
+      "main": [[{ "node": "Enviar Resposta Desconhecida", "type": "main", "index": 0 }]]
+    }
+  },
+
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "pinData": {},
+  "versionId": "1.0.0",
+
+  "_setup_instructions": {
+    "step_1_workflow_variables": {
+      "description": "Configure as variáveis do workflow em Settings > Variables",
+      "variables": {
+        "SUPABASE_URL":        "https://SEU_PROJETO.supabase.co",
+        "SUPABASE_KEY":        "sua_anon_key_ou_service_key_do_supabase",
+        "EVOLUTION_URL":       "http://SEU_HOST_EVOLUTION:8080",
+        "EVOLUTION_KEY":       "sua_api_key_do_evolution",
+        "EVOLUTION_INSTANCE":  "nome_da_sua_instancia"
+      }
+    },
+    "step_2_category_uuids": {
+      "description": "Após criar as categorias no Supabase, substitua os placeholders nos nodes 'Processar Onboarding' e 'Parsear Gasto e Categoria'",
+      "query_to_run": "SELECT id, name FROM categories ORDER BY name;",
+      "placeholders_to_replace": [
+        "UUID_ALIMENTACAO",
+        "UUID_TRANSPORTE",
+        "UUID_LAZER",
+        "UUID_SAUDE",
+        "UUID_MORADIA",
+        "UUID_ROUPAS",
+        "UUID_EDUCACAO",
+        "UUID_OUTROS"
+      ]
+    },
+    "step_3_webhook_url": {
+      "description": "URL do webhook para configurar no Evolution API",
+      "format": "https://SEU_N8N_HOST/webhook/general-grana",
+      "evolution_config": {
+        "endpoint": "POST /webhook/set/{instance}",
+        "body": {
+          "url": "https://SEU_N8N_HOST/webhook/general-grana",
+          "webhook_by_events": false,
+          "webhook_base64": false,
+          "events": ["MESSAGES_UPSERT"]
+        }
+      }
+    }
+  }
+}
