@@ -1,0 +1,409 @@
+{
+  "name": "Follow-up Atendimento - Evolution API (SDRVOE)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "trigger-schedule",
+      "name": "Verificar Follow-ups (A cada hora)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [80, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT session_id, phone_number, customer_name, last_message_at, follow_up_stage, flight_origin, flight_destination, travel_date, quote_value, follow_up_count FROM conversations WHERE status = 'pending' AND last_message_at < NOW() - INTERVAL '2 hours' AND (follow_up_sent_at IS NULL OR follow_up_sent_at < NOW() - INTERVAL '24 hours') AND follow_up_count < 3 ORDER BY last_message_at ASC LIMIT 50;",
+        "options": {}
+      },
+      "id": "db-buscar-pendentes",
+      "name": "Buscar Conversas Pendentes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [300, 300],
+      "credentials": {
+        "postgres": {
+          "id": "SEU_CREDENTIAL_POSTGRES_ID",
+          "name": "Postgres - SDRVOE"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE conversations SET status = 'closed', closed_reason = 'follow_up_limit_reached', updated_at = NOW() WHERE session_id IN (SELECT session_id FROM conversations WHERE status = 'pending' AND follow_up_count >= 3 AND last_message_at < NOW() - INTERVAL '72 hours');",
+        "options": {}
+      },
+      "id": "db-fechar-antigas",
+      "name": "Fechar Conversas Sem Resposta",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [300, 500],
+      "credentials": {
+        "postgres": {
+          "id": "SEU_CREDENTIAL_POSTGRES_ID",
+          "name": "Postgres - SDRVOE"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-results",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-tem-pendentes",
+      "name": "Tem conversas pendentes?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "console.log('[Follow-up] Nenhuma conversa pendente encontrada.');\nreturn [];"
+      },
+      "id": "no-op-sem-pendentes",
+      "name": "Nenhum follow-up necessario",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 480]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "id": "split-conversas",
+      "name": "Processar cada conversa",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [740, 220]
+    },
+    {
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "rule-quote",
+                    "leftValue": "={{ $json.follow_up_stage }}",
+                    "rightValue": "quote_sent",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "cotacao_enviada"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "rule-initial",
+                    "leftValue": "={{ $json.follow_up_stage }}",
+                    "rightValue": "initial_contact",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "contato_inicial"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "rule-abandoned",
+                    "leftValue": "={{ $json.follow_up_stage }}",
+                    "rightValue": "booking_abandoned",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "reserva_abandonada"
+            }
+          ]
+        },
+        "fallbackOutput": "extra",
+        "options": {}
+      },
+      "id": "check-estagio",
+      "name": "Qual estagio do follow-up?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [960, 220]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\nconst n = item.follow_up_count || 0;\nconst msgs = [\n  'Ola ' + item.customer_name + '! Vi que voce estava pesquisando passagens de ' + item.flight_origin + ' para ' + item.flight_destination + '. Sua cotacao ainda esta disponivel! Quer que eu verifique a disponibilidade atualizada?',\n  'Oi ' + item.customer_name + '! Tudo bem? Nao quero que voce perca essa oportunidade de viagem para ' + item.flight_destination + '. Os precos podem mudar - posso confirmar sua reserva agora?',\n  item.customer_name + ', ultima oportunidade! Sua cotacao para ' + item.flight_destination + (item.travel_date ? ' em ' + item.travel_date : '') + ' esta prestes a expirar. Posso ajudar a finalizar sua compra?'\n];\nreturn [{ json: { ...item, follow_up_message: msgs[Math.min(n, msgs.length - 1)], follow_up_type: 'quote_followup', novo_follow_up_count: n + 1 } }];"
+      },
+      "id": "msg-cotacao",
+      "name": "Mensagem - Cotacao Pendente",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 60]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\nconst n = item.follow_up_count || 0;\nconst msgs = [\n  'Ola ' + item.customer_name + '! Somos da SDRVOE Passagens. Voce entrou em contato conosco e gostaríamos de te ajudar. Como posso te ajudar hoje?',\n  'Oi ' + item.customer_name + '! Estamos aqui para ajudar com suas passagens aereas. Voce tem alguma duvida ou quer fazer uma cotacao?',\n  item.customer_name + ', estamos disponiveis para voce! Se precisar de passagens ou cotacoes, e so chamar!'\n];\nreturn [{ json: { ...item, follow_up_message: msgs[Math.min(n, msgs.length - 1)], follow_up_type: 'initial_contact_followup', novo_follow_up_count: n + 1 } }];"
+      },
+      "id": "msg-contato-inicial",
+      "name": "Mensagem - Contato Inicial",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 240]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\nconst n = item.follow_up_count || 0;\nconst msgs = [\n  'Oi ' + item.customer_name + '! Notei que voce estava quase finalizando sua reserva para ' + item.flight_destination + '. Aconteceu algum problema? Posso ajudar a concluir sua compra!',\n  item.customer_name + ', ainda da tempo! Sua reserva para ' + item.flight_destination + (item.travel_date ? ' em ' + item.travel_date : '') + ' esta aguardando. Quer que eu retome o processo para voce?',\n  'Ultima chance, ' + item.customer_name + '! Finalize sua passagem para ' + item.flight_destination + ' antes que os assentos esgotem. Me chame agora!'\n];\nreturn [{ json: { ...item, follow_up_message: msgs[Math.min(n, msgs.length - 1)], follow_up_type: 'abandoned_booking_followup', novo_follow_up_count: n + 1 } }];"
+      },
+      "id": "msg-reserva-abandonada",
+      "name": "Mensagem - Reserva Abandonada",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 420]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\nreturn [{ json: { ...item, follow_up_message: 'Ola ' + item.customer_name + '! Ainda podemos ajuda-lo com suas passagens aereas. Como posso te ajudar?', follow_up_type: 'generic_followup', novo_follow_up_count: (item.follow_up_count || 0) + 1 } }];"
+      },
+      "id": "msg-generica",
+      "name": "Mensagem - Generica",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 600]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $vars.EVOLUTION_API_URL }}/message/sendText/{{ $vars.EVOLUTION_INSTANCE }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "={{ $vars.EVOLUTION_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{ $json.phone_number }}@s.whatsapp.net\",\n  \"text\": \"{{ $json.follow_up_message }}\",\n  \"delay\": 1200,\n  \"linkPreview\": false,\n  \"mentionsEveryOne\": false\n}",
+        "options": {}
+      },
+      "id": "evolution-send",
+      "name": "Enviar via Evolution API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1440, 320]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-success",
+              "leftValue": "={{ $json.key.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-enviou",
+      "name": "Mensagem enviada com sucesso?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1660, 320]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE conversations SET follow_up_sent_at = NOW(), follow_up_count = {{ $json.novo_follow_up_count }}, last_follow_up_type = '{{ $json.follow_up_type }}', updated_at = NOW() WHERE session_id = '{{ $json.session_id }}';",
+        "options": {}
+      },
+      "id": "db-atualiza-sucesso",
+      "name": "Atualizar DB - Enviado",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1880, 200],
+      "credentials": {
+        "postgres": {
+          "id": "SEU_CREDENTIAL_POSTGRES_ID",
+          "name": "Postgres - SDRVOE"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE conversations SET follow_up_error = 'Falha ao enviar via Evolution', follow_up_error_at = NOW(), updated_at = NOW() WHERE session_id = '{{ $json.session_id }}';",
+        "options": {}
+      },
+      "id": "db-atualiza-erro",
+      "name": "Registrar Erro de Envio",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1880, 440],
+      "credentials": {
+        "postgres": {
+          "id": "SEU_CREDENTIAL_POSTGRES_ID",
+          "name": "Postgres - SDRVOE"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconsole.log('[Follow-up Evolution] Processados: ' + items.length);\nreturn [{ json: { total: items.length, timestamp: new Date().toISOString() } }];"
+      },
+      "id": "relatorio-final",
+      "name": "Relatorio de Execucao",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2100, 320]
+    }
+  ],
+  "connections": {
+    "Verificar Follow-ups (A cada hora)": {
+      "main": [
+        [
+          { "node": "Buscar Conversas Pendentes", "type": "main", "index": 0 },
+          { "node": "Fechar Conversas Sem Resposta", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Buscar Conversas Pendentes": {
+      "main": [
+        [{ "node": "Tem conversas pendentes?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Tem conversas pendentes?": {
+      "main": [
+        [{ "node": "Processar cada conversa", "type": "main", "index": 0 }],
+        [{ "node": "Nenhum follow-up necessario", "type": "main", "index": 0 }]
+      ]
+    },
+    "Processar cada conversa": {
+      "main": [
+        [{ "node": "Qual estagio do follow-up?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Qual estagio do follow-up?": {
+      "main": [
+        [{ "node": "Mensagem - Cotacao Pendente", "type": "main", "index": 0 }],
+        [{ "node": "Mensagem - Contato Inicial", "type": "main", "index": 0 }],
+        [{ "node": "Mensagem - Reserva Abandonada", "type": "main", "index": 0 }],
+        [{ "node": "Mensagem - Generica", "type": "main", "index": 0 }]
+      ]
+    },
+    "Mensagem - Cotacao Pendente": {
+      "main": [[{ "node": "Enviar via Evolution API", "type": "main", "index": 0 }]]
+    },
+    "Mensagem - Contato Inicial": {
+      "main": [[{ "node": "Enviar via Evolution API", "type": "main", "index": 0 }]]
+    },
+    "Mensagem - Reserva Abandonada": {
+      "main": [[{ "node": "Enviar via Evolution API", "type": "main", "index": 0 }]]
+    },
+    "Mensagem - Generica": {
+      "main": [[{ "node": "Enviar via Evolution API", "type": "main", "index": 0 }]]
+    },
+    "Enviar via Evolution API": {
+      "main": [[{ "node": "Mensagem enviada com sucesso?", "type": "main", "index": 0 }]]
+    },
+    "Mensagem enviada com sucesso?": {
+      "main": [
+        [{ "node": "Atualizar DB - Enviado", "type": "main", "index": 0 }],
+        [{ "node": "Registrar Erro de Envio", "type": "main", "index": 0 }]
+      ]
+    },
+    "Atualizar DB - Enviado": {
+      "main": [[{ "node": "Relatorio de Execucao", "type": "main", "index": 0 }]]
+    },
+    "Registrar Erro de Envio": {
+      "main": [[{ "node": "Relatorio de Execucao", "type": "main", "index": 0 }]]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": ["follow-up", "evolution-api", "whatsapp", "passagens-aereas"],
+  "triggerCount": 1,
+  "updatedAt": "2026-03-12T00:00:00.000Z",
+  "versionId": "1"
+}
