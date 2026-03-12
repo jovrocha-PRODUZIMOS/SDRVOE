@@ -1,0 +1,429 @@
+{
+  "project": "General Grana",
+  "version": "1.0.0",
+  "description": "Assistente financeiro raivoso via WhatsApp",
+
+  "infrastructure": {
+    "whatsapp": {
+      "provider": "Evolution API",
+      "webhook_endpoint": "POST /webhook/evolution",
+      "events": ["messages.upsert"]
+    },
+    "database": {
+      "provider": "Supabase",
+      "type": "PostgreSQL"
+    },
+    "backend": {
+      "runtime": "Node.js",
+      "framework": "Express ou Fastify"
+    }
+  },
+
+  "database_schema": {
+    "tables": {
+      "users": {
+        "columns": {
+          "id": "uuid PRIMARY KEY DEFAULT gen_random_uuid()",
+          "phone": "varchar(20) UNIQUE NOT NULL",
+          "name": "varchar(100)",
+          "onboarding_step": "int DEFAULT 0",
+          "onboarding_complete": "boolean DEFAULT false",
+          "created_at": "timestamp DEFAULT now()"
+        }
+      },
+      "categories": {
+        "description": "Categorias padrão do sistema",
+        "columns": {
+          "id": "uuid PRIMARY KEY DEFAULT gen_random_uuid()",
+          "name": "varchar(50) NOT NULL",
+          "emoji": "varchar(10)",
+          "keywords": "text[] — array de palavras-chave para detecção automática"
+        },
+        "seed_data": [
+          { "name": "Alimentação",  "emoji": "🍔", "keywords": ["ifood","restaurante","lanche","almoço","jantar","mercado","padaria","pizza","hamburguer"] },
+          { "name": "Transporte",   "emoji": "🚗", "keywords": ["uber","99","gasolina","combustivel","onibus","metro","estacionamento"] },
+          { "name": "Lazer",        "emoji": "🎮", "keywords": ["netflix","spotify","cinema","show","jogo","bar","balada","viagem"] },
+          { "name": "Saúde",        "emoji": "💊", "keywords": ["farmacia","remedio","consulta","medico","academia","dentista"] },
+          { "name": "Moradia",      "emoji": "🏠", "keywords": ["aluguel","condominio","conta","luz","agua","internet","gas"] },
+          { "name": "Roupas",       "emoji": "👕", "keywords": ["roupa","tenis","sapato","camisa","calça","vestido","shein","zara"] },
+          { "name": "Educação",     "emoji": "📚", "keywords": ["curso","faculdade","livro","escola","udemy","alura"] },
+          { "name": "Outros",       "emoji": "💸", "keywords": [] }
+        ]
+      },
+      "user_budgets": {
+        "description": "Meta de gastos mensal por categoria por usuário",
+        "columns": {
+          "id": "uuid PRIMARY KEY DEFAULT gen_random_uuid()",
+          "user_id": "uuid REFERENCES users(id)",
+          "category_id": "uuid REFERENCES categories(id)",
+          "monthly_limit": "numeric(10,2) NOT NULL",
+          "created_at": "timestamp DEFAULT now()",
+          "updated_at": "timestamp DEFAULT now()"
+        },
+        "constraints": ["UNIQUE(user_id, category_id)"]
+      },
+      "expenses": {
+        "description": "Registro de cada gasto do usuário",
+        "columns": {
+          "id": "uuid PRIMARY KEY DEFAULT gen_random_uuid()",
+          "user_id": "uuid REFERENCES users(id)",
+          "category_id": "uuid REFERENCES categories(id)",
+          "amount": "numeric(10,2) NOT NULL",
+          "description": "text",
+          "raw_message": "text — mensagem original do usuário",
+          "expense_date": "date DEFAULT CURRENT_DATE",
+          "month": "int GENERATED ALWAYS AS (EXTRACT(MONTH FROM expense_date)) STORED",
+          "year": "int GENERATED ALWAYS AS (EXTRACT(YEAR FROM expense_date)) STORED",
+          "created_at": "timestamp DEFAULT now()"
+        }
+      },
+      "user_state": {
+        "description": "Controla estado da conversa (onboarding, aguardando resposta etc)",
+        "columns": {
+          "id": "uuid PRIMARY KEY DEFAULT gen_random_uuid()",
+          "user_id": "uuid REFERENCES users(id) UNIQUE",
+          "current_flow": "varchar(50) — ex: onboarding, idle, awaiting_category",
+          "flow_data": "jsonb — dados temporários do fluxo atual",
+          "updated_at": "timestamp DEFAULT now()"
+        }
+      }
+    }
+  },
+
+  "message_flows": {
+
+    "flow_1_incoming_message": {
+      "description": "Entrada de qualquer mensagem pelo Evolution API",
+      "steps": [
+        {
+          "step": 1,
+          "name": "receive_webhook",
+          "action": "Evolution API dispara POST /webhook/evolution",
+          "extract": ["phone", "message_text", "timestamp"]
+        },
+        {
+          "step": 2,
+          "name": "find_or_create_user",
+          "action": "SELECT * FROM users WHERE phone = $phone",
+          "if_not_found": "INSERT INTO users (phone) — vai para flow_2_onboarding",
+          "if_found": "verificar onboarding_complete"
+        },
+        {
+          "step": 3,
+          "name": "route_by_state",
+          "conditions": {
+            "onboarding_complete = false": "→ flow_2_onboarding",
+            "onboarding_complete = true": "→ flow_3_intent_detection"
+          }
+        }
+      ]
+    },
+
+    "flow_2_onboarding": {
+      "description": "Primeiro contato — coleta metas de gasto por categoria",
+      "steps": [
+        {
+          "step": 1,
+          "name": "welcome_message",
+          "trigger": "onboarding_step = 0",
+          "send_message": "Sentido firme, recruta! Aqui é o General Grana. Antes de qualquer coisa, preciso saber quanto você PLANEJA gastar por mês em cada categoria. Vou perguntar uma por uma. Pode mandar o valor em reais ou digitar 0 se não quiser monitorar essa categoria.\n\nPrimeiro: quanto você vai gastar por mês em *Alimentação* 🍔 (iFood, restaurante, mercado)?",
+          "next": "set onboarding_step = 1, current_category_index = 0"
+        },
+        {
+          "step": 2,
+          "name": "collect_budget_loop",
+          "trigger": "onboarding_step >= 1 AND onboarding_step <= 8",
+          "action": "Recebe valor numérico do usuário",
+          "process": [
+            "Parsear valor da mensagem",
+            "Se valor > 0: INSERT INTO user_budgets (user_id, category_id, monthly_limit)",
+            "Incrementar onboarding_step",
+            "Se ainda há categorias: enviar próxima pergunta",
+            "Se acabaram as categorias: ir para step 3"
+          ],
+          "questions_sequence": [
+            "Alimentação 🍔",
+            "Transporte 🚗",
+            "Lazer 🎮",
+            "Saúde 💊",
+            "Moradia 🏠",
+            "Roupas 👕",
+            "Educação 📚"
+          ]
+        },
+        {
+          "step": 3,
+          "name": "onboarding_complete",
+          "trigger": "onboarding_step = 8",
+          "action": "UPDATE users SET onboarding_complete = true",
+          "send_message": "Missão de briefing concluída! Agora toda vez que você gastar uma grana, me manda uma mensagem tipo: *'General, gastei 50 reais no iFood'* — e eu vou te xingar e registrar. Entendido, recruta?",
+          "set_state": "current_flow = idle"
+        }
+      ]
+    },
+
+    "flow_3_intent_detection": {
+      "description": "Identifica o que o usuário quer fazer",
+      "intents": [
+        {
+          "intent": "register_expense",
+          "patterns": [
+            "gastei X reais em Y",
+            "acabei de gastar X em Y",
+            "paguei X no Y",
+            "comprei Y por X",
+            "gastei X"
+          ],
+          "keywords_trigger": ["gastei", "paguei", "comprei", "acabei de gastar", "torrei"],
+          "next_flow": "flow_4_register_expense"
+        },
+        {
+          "intent": "check_monthly_summary",
+          "patterns": [
+            "quanto gastei esse mês",
+            "resumo do mês",
+            "meu saldo",
+            "situação financeira",
+            "como estou esse mês"
+          ],
+          "next_flow": "flow_5_monthly_summary"
+        },
+        {
+          "intent": "check_category_spending",
+          "patterns": [
+            "quanto gastei com X",
+            "quanto gastei no ifood",
+            "gasto com alimentação"
+          ],
+          "next_flow": "flow_6_category_spending"
+        },
+        {
+          "intent": "check_annual_summary",
+          "patterns": [
+            "quanto gastei esse ano",
+            "resumo anual",
+            "total do ano"
+          ],
+          "next_flow": "flow_7_annual_summary"
+        },
+        {
+          "intent": "update_budget",
+          "patterns": [
+            "quero mudar minha meta",
+            "atualizar limite",
+            "nova meta para X"
+          ],
+          "next_flow": "flow_8_update_budget"
+        },
+        {
+          "intent": "unknown",
+          "next_flow": "flow_9_unknown_message"
+        }
+      ]
+    },
+
+    "flow_4_register_expense": {
+      "description": "Registra gasto e responde com xingamento calibrado",
+      "steps": [
+        {
+          "step": 1,
+          "name": "extract_entities",
+          "action": "Parsear mensagem para extrair amount e description",
+          "method": "regex + NLP simples",
+          "regex_example": "/gastei\\s+([\\d.,]+)\\s+(?:reais?|r\\$)?\\s*(?:em|no|na|com)?\\s*(.+)/i",
+          "output": { "amount": "number", "description": "string" }
+        },
+        {
+          "step": 2,
+          "name": "detect_category",
+          "action": "Verificar keywords da description contra categories.keywords",
+          "process": [
+            "Normalizar texto: lowercase + remover acentos",
+            "Para cada categoria: verificar se alguma keyword está na description",
+            "Se match encontrado: usar essa categoria",
+            "Se sem match: usar categoria 'Outros'"
+          ]
+        },
+        {
+          "step": 3,
+          "name": "save_expense",
+          "action": "INSERT INTO expenses (user_id, category_id, amount, description, raw_message)"
+        },
+        {
+          "step": 4,
+          "name": "calculate_monthly_total",
+          "query": "SELECT SUM(amount) FROM expenses WHERE user_id = $id AND month = $current_month AND year = $current_year AND category_id = $category_id",
+          "also_calculate": "total geral do mês"
+        },
+        {
+          "step": 5,
+          "name": "check_budget_status",
+          "action": "Comparar total mensal da categoria com user_budgets.monthly_limit",
+          "output": {
+            "category_spent": "number",
+            "category_limit": "number",
+            "category_percentage": "number",
+            "total_month_spent": "number"
+          }
+        },
+        {
+          "step": 6,
+          "name": "generate_response",
+          "logic": {
+            "percentage_0_50": {
+              "tone": "irritado mas controlado",
+              "examples": [
+                "Registrado, recruta. Já gastou {category_spent} reais em {category} esse mês. Continua assim e vai torrar tudo.",
+                "Anotado! {category_spent} reais em {category} no mês. Vai devagar, pelo amor de Deus."
+              ]
+            },
+            "percentage_50_80": {
+              "tone": "bravo",
+              "examples": [
+                "PORRA! Já foi {category_spent} de {category_limit} reais em {category}! Você tá no limite, recruta!",
+                "Que isso, recruta?! Já estorou {percentage}% do limite de {category}. Segura a onda!"
+              ]
+            },
+            "percentage_80_100": {
+              "tone": "furioso",
+              "examples": [
+                "VAI TOMA NO CU! Você já usou {percentage}% do seu limite de {category}! Faltam só {remaining} reais! PARA DE GASTAR!",
+                "RECRUTA IRRESPONSÁVEL! {percentage}% do limite de {category} jogado fora! Sua mãe falou pra guardar dinheiro ou não?!"
+              ]
+            },
+            "percentage_above_100": {
+              "tone": "apocalíptico",
+              "examples": [
+                "MISSÃO FRACASSADA! Você ESTOUROU o limite de {category}! Era {category_limit} reais e você gastou {category_spent}! INCOMPETENTE!",
+                "VOCÊ EXPLODIU O ORÇAMENTO DE {category}! Ultrapassou em {overflow} reais! Isso é uma vergonha, recruta!"
+              ]
+            }
+          }
+        }
+      ]
+    },
+
+    "flow_5_monthly_summary": {
+      "description": "Resumo de todos os gastos do mês atual",
+      "steps": [
+        {
+          "step": 1,
+          "query": "SELECT c.name, c.emoji, SUM(e.amount) as total, ub.monthly_limit FROM expenses e JOIN categories c ON e.category_id = c.id LEFT JOIN user_budgets ub ON ub.category_id = c.id AND ub.user_id = e.user_id WHERE e.user_id = $id AND e.month = $month AND e.year = $year GROUP BY c.name, c.emoji, ub.monthly_limit ORDER BY total DESC"
+        },
+        {
+          "step": 2,
+          "name": "format_response",
+          "format": "Lista por categoria com total e percentual do limite",
+          "example_response": "Situação do campo de batalha em {mês}/{ano}, recruta:\n\n🍔 Alimentação: R$ 350 / R$ 400 (87%) ⚠️\n🚗 Transporte: R$ 120 / R$ 200 (60%)\n🎮 Lazer: R$ 450 / R$ 300 (150%) 🔴\n\n💸 TOTAL GERAL: R$ 920 reais torrados esse mês\n\nTá achando que dinheiro é brincadeira, recruta?!"
+        }
+      ]
+    },
+
+    "flow_6_category_spending": {
+      "description": "Gasto de uma categoria específica no mês",
+      "steps": [
+        {
+          "step": 1,
+          "name": "detect_category_from_message",
+          "action": "Extrair qual categoria o usuário quer ver"
+        },
+        {
+          "step": 2,
+          "query": "SELECT SUM(amount), monthly_limit FROM expenses JOIN user_budgets ... WHERE category = $category AND month = $month",
+          "also_fetch": "lista dos últimos 5 gastos dessa categoria"
+        },
+        {
+          "step": 3,
+          "name": "format_response",
+          "example_response": "Em {categoria} você jogou fora R$ {total} esse mês (limite era R$ {limite}).\n\nSeus últimos gastos:\n• {desc1} — R$ {val1}\n• {desc2} — R$ {val2}\n\nTá satisfeito com essa carnificina financeira?"
+        }
+      ]
+    },
+
+    "flow_7_annual_summary": {
+      "description": "Resumo anual de gastos",
+      "steps": [
+        {
+          "step": 1,
+          "query": "SELECT month, SUM(amount) as total FROM expenses WHERE user_id = $id AND year = $year GROUP BY month ORDER BY month"
+        },
+        {
+          "step": 2,
+          "also_query": "SELECT c.name, SUM(e.amount) as total FROM expenses e JOIN categories c ... WHERE year = $year GROUP BY c.name ORDER BY total DESC"
+        },
+        {
+          "step": 3,
+          "format_response": "Relatório anual {ano}, recruta:\n\n📊 Por mês:\nJan: R$ X | Fev: R$ X | ... | Dez: R$ X\n\nTOTAL DO ANO: R$ {total}\n\n🏆 Categoria que você mais destruiu: {top_category} com R$ {top_amount}\n\nVergonhoso. Isso dava pra montar um fundo de emergência decente."
+        }
+      ]
+    },
+
+    "flow_8_update_budget": {
+      "description": "Atualizar limite mensal de uma categoria",
+      "steps": [
+        {
+          "step": 1,
+          "send": "Qual categoria você quer atualizar o limite?"
+        },
+        {
+          "step": 2,
+          "action": "Aguarda resposta com nome da categoria",
+          "set_state": "awaiting_budget_update_category"
+        },
+        {
+          "step": 3,
+          "send": "Qual o novo limite mensal para {categoria}?"
+        },
+        {
+          "step": 4,
+          "action": "UPDATE user_budgets SET monthly_limit = $new_limit WHERE user_id = $id AND category_id = $category_id",
+          "response": "Atualizado, recruta! Novo limite de {categoria}: R$ {novo_limite}. Agora tenta respeitar dessa vez."
+        }
+      ]
+    },
+
+    "flow_9_unknown_message": {
+      "description": "Mensagem não reconhecida",
+      "response_options": [
+        "Fala direito, recruta! Me diz quanto gastou e onde. Exemplo: 'General, gastei 50 reais no iFood'",
+        "Não entendi patavina. Quer registrar um gasto? Me fala o valor e onde gastou.",
+        "Isso não é ordem que se dá! Me manda o valor e o que comprou, recruta."
+      ]
+    }
+
+  },
+
+  "parsing_rules": {
+    "amount_extraction": {
+      "patterns": [
+        "\\d+[,.]\\d{2}",
+        "\\d+\\s*reais",
+        "R\\$\\s*\\d+",
+        "\\d+"
+      ],
+      "normalize": "Substituir vírgula por ponto, remover 'reais', 'r$'"
+    },
+    "description_extraction": {
+      "patterns": [
+        "(?:gastei|paguei|comprei|torrei)\\s+[\\d.,]+\\s*(?:reais?|r\\$)?\\s*(?:em|no|na|com|de)?\\s*(.+)",
+        "(?:no|na|em)\\s+(.+)$"
+      ]
+    }
+  },
+
+  "environment_variables": {
+    "SUPABASE_URL": "https://xxxx.supabase.co",
+    "SUPABASE_SERVICE_KEY": "sua_service_key",
+    "EVOLUTION_API_URL": "http://seu_evolution_api",
+    "EVOLUTION_API_KEY": "sua_api_key",
+    "EVOLUTION_INSTANCE": "nome_da_instancia",
+    "PORT": "3000"
+  },
+
+  "api_endpoints": {
+    "POST /webhook/evolution": "Recebe mensagens do WhatsApp",
+    "GET /health": "Health check",
+    "GET /admin/users": "Lista usuários (admin)",
+    "GET /admin/expenses/:userId": "Gastos de um usuário (admin)"
+  }
+}
